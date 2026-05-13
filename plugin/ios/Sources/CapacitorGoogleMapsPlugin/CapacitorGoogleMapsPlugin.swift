@@ -1186,7 +1186,7 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate, CAPBridge
                 "snippet": marker.snippet ?? ""
             ])
         }
-        return false
+        return true
     }
 
     // onMarkerDragStart
