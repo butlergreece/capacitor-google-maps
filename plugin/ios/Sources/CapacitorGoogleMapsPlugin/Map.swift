@@ -443,6 +443,58 @@ public class Map {
         }
     }
 
+    func updateMarker(id: Int, marker: Marker) throws {
+        guard let existingMarker = self.markers[id] else {
+            throw GoogleMapErrors.markerNotFound
+        }
+
+        DispatchQueue.main.sync {
+            existingMarker.position = CLLocationCoordinate2D(
+                latitude: marker.coordinate.lat,
+                longitude: marker.coordinate.lng
+            )
+            existingMarker.title = marker.title
+            existingMarker.snippet = marker.snippet
+            existingMarker.isFlat = marker.isFlat ?? false
+            existingMarker.opacity = marker.opacity ?? 1
+            existingMarker.isDraggable = marker.draggable ?? false
+            existingMarker.zIndex = marker.zIndex
+
+            if let iconAnchor = marker.iconAnchor {
+                existingMarker.groundAnchor = iconAnchor
+            }
+
+            if let iconUrl = marker.iconUrl {
+                if let iconImage = self.markerIcons[iconUrl] {
+                    existingMarker.icon = getResizedIcon(iconImage, marker)
+                } else {
+                    if iconUrl.starts(with: "https:") {
+                        if let url = URL(string: iconUrl) {
+                            URLSession.shared.dataTask(with: url) { (data, _, _) in
+                                DispatchQueue.main.async {
+                                    if let data = data, let iconImage = UIImage(data: data) {
+                                        self.markerIcons[iconUrl] = iconImage
+                                        existingMarker.icon = getResizedIcon(iconImage, marker)
+                                    }
+                                }
+                            }.resume()
+                        }
+                    } else if let iconImage = UIImage(named: "public/\(iconUrl)") {
+                        self.markerIcons[iconUrl] = iconImage
+                        existingMarker.icon = getResizedIcon(iconImage, marker)
+                    }
+                }
+            } else if let color = marker.color {
+                existingMarker.icon = GMSMarker.markerImage(with: color)
+            }
+
+            // Re-cluster if needed
+            if self.mapViewController.clusteringEnabled {
+                self.mapViewController.clusterManager?.cluster()
+            }
+        }
+    }
+
     func removePolygons(ids: [Int]) throws {
         DispatchQueue.main.sync {
             ids.forEach { id in

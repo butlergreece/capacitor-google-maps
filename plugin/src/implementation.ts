@@ -64,6 +64,12 @@ export interface RemoveMarkerArgs {
   markerId: string;
 }
 
+export interface UpdateMarkerArgs {
+  id: string;
+  markerId: string;
+  marker: Marker;
+}
+
 export interface RemoveMarkersArgs {
   id: string;
   markerIds: string[];
@@ -189,6 +195,7 @@ export interface CapacitorGoogleMapsPlugin extends Plugin {
   addMarker(args: AddMarkerArgs): Promise<{ id: string }>;
   addMarkers(args: AddMarkersArgs): Promise<{ ids: string[] }>;
   removeMarker(args: RemoveMarkerArgs): Promise<void>;
+  updateMarker(args: UpdateMarkerArgs): Promise<void>;
   removeMarkers(args: RemoveMarkersArgs): Promise<void>;
   addPolygons(args: AddPolygonsArgs): Promise<{ ids: string[] }>;
   removePolygons(args: RemovePolygonsArgs): Promise<void>;

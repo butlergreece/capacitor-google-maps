@@ -18,6 +18,7 @@ import type {
   RemoveMarkerArgs,
   TrafficLayerArgs,
   RemoveMarkersArgs,
+  UpdateMarkerArgs,
   MapBoundsContainsArgs,
   EnableClusteringArgs,
   FitBoundsArgs,
@@ -352,6 +353,18 @@ export class CapacitorGoogleMapsWeb extends WebPlugin implements CapacitorGoogle
     if (this.maps[_args.id].markers[_args.markerId]) {
       this.maps[_args.id].markers[_args.markerId].map = null;
       delete this.maps[_args.id].markers[_args.markerId];
+    }
+  }
+
+  async updateMarker(_args: UpdateMarkerArgs): Promise<void> {
+    const map = this.maps[_args.id];
+    const existingMarker = map?.markers[_args.markerId];
+    if (existingMarker) {
+      // Remove old marker and add updated one
+      existingMarker.map = null;
+      const advancedMarker = this.buildMarkerOpts(_args.marker, map.map);
+      map.markers[_args.markerId] = advancedMarker;
+      await this.setMarkerListeners(_args.id, _args.markerId, advancedMarker);
     }
   }
 

@@ -408,6 +408,21 @@ export class GoogleMap {
   }
 
   /**
+   * Update an existing marker on the map
+   *
+   * @param markerId id of the marker to update
+   * @param marker marker properties to update
+   * @returns
+   */
+  async updateMarker(markerId: string, marker: Marker): Promise<void> {
+    return CapacitorGoogleMaps.updateMarker({
+      id: this.id,
+      markerId,
+      marker,
+    });
+  }
+
+  /**
    * Remove markers from the map
    *
    * @param ids array of ids to remove from the map

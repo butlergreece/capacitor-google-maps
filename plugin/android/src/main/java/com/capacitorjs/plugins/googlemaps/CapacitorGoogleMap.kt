@@ -533,6 +533,64 @@ class CapacitorGoogleMap(
         }
     }
 
+    fun updateMarker(markerId: String, updatedMarker: CapacitorGoogleMapMarker, callback: (error: GoogleMapsError?) -> Unit) {
+        try {
+            googleMap ?: throw GoogleMapNotAvailable()
+
+            val existingMarker = markers[markerId]
+            existingMarker ?: throw MarkerNotFoundError()
+
+            CoroutineScope(Dispatchers.Main).launch {
+                // Update the data wrapper (used by clustering renderer)
+                existingMarker.coordinate = updatedMarker.coordinate
+                existingMarker.opacity = updatedMarker.opacity
+                existingMarker.title = updatedMarker.title
+                existingMarker.snippet = updatedMarker.snippet
+                existingMarker.isFlat = updatedMarker.isFlat
+                existingMarker.draggable = updatedMarker.draggable
+                existingMarker.zIndex = updatedMarker.zIndex
+                existingMarker.iconUrl = updatedMarker.iconUrl
+                existingMarker.iconSize = updatedMarker.iconSize
+                existingMarker.iconAnchor = updatedMarker.iconAnchor
+                existingMarker.colorHue = updatedMarker.colorHue
+
+                // Rebuild MarkerOptions (reuses icon cache + resize logic)
+                val markerOptions: Deferred<MarkerOptions> =
+                    CoroutineScope(Dispatchers.IO).async {
+                        this@CapacitorGoogleMap.buildMarker(existingMarker)
+                    }
+                val options = markerOptions.await()
+
+                // Apply to native marker
+                val nativeMarker = existingMarker.googleMapMarker
+                if (nativeMarker != null) {
+                    nativeMarker.position = options.position
+                    nativeMarker.title = options.title
+                    nativeMarker.snippet = options.snippet
+                    nativeMarker.alpha = options.alpha
+                    nativeMarker.isFlat = options.isFlat
+                    nativeMarker.isDraggable = options.isDraggable
+                    nativeMarker.zIndex = options.zIndex
+                    if (existingMarker.iconAnchor != null) {
+                        nativeMarker.setAnchor(existingMarker.iconAnchor!!.x, existingMarker.iconAnchor!!.y)
+                    }
+                    if (options.icon != null) {
+                        nativeMarker.setIcon(options.icon)
+                    }
+                }
+
+                // If clustering is active, re-cluster to pick up changes
+                if (clusterManager != null) {
+                    clusterManager?.cluster()
+                }
+
+                callback(null)
+            }
+        } catch (e: GoogleMapsError) {
+            callback(e)
+        }
+    }
+
     fun removeMarkers(ids: List<String>, callback: (error: GoogleMapsError?) -> Unit) {
         try {
             googleMap ?: throw GoogleMapNotAvailable()

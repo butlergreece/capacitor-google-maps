@@ -79,6 +79,7 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate, CAPBridge
         CAPPluginMethod(name: "addPolylines", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "addCircles", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "removeMarker", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "updateMarker", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "removeMarkers", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "removeCircles", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "removePolygons", returnType: CAPPluginReturnPromise),
@@ -384,6 +385,39 @@ public class CapacitorGoogleMapsPlugin: CAPPlugin, GMSMapViewDelegate, CAPBridge
             }
 
             try map.removeMarker(id: markerId)
+
+            call.resolve()
+
+        } catch {
+            handleError(call, error: error)
+        }
+    }
+
+    @objc func updateMarker(_ call: CAPPluginCall) {
+        do {
+            guard let id = call.getString("id") else {
+                throw GoogleMapErrors.invalidMapId
+            }
+
+            guard let markerIdString = call.getString("markerId") else {
+                throw GoogleMapErrors.invalidArguments("markerId is invalid or missing")
+            }
+
+            guard let markerId = Int(markerIdString) else {
+                throw GoogleMapErrors.invalidArguments("markerId is invalid or missing")
+            }
+
+            guard let markerObj = call.getObject("marker") else {
+                throw GoogleMapErrors.invalidArguments("marker object is missing")
+            }
+
+            let marker = try Marker(fromJSObject: markerObj)
+
+            guard let map = self.maps[id] else {
+                throw GoogleMapErrors.mapNotFound
+            }
+
+            try map.updateMarker(id: markerId, marker: marker)
 
             call.resolve()
 
