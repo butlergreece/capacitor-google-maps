@@ -16,6 +16,7 @@ import com.google.android.gms.maps.GoogleMap.*
 import com.google.android.gms.maps.model.*
 import com.google.maps.android.clustering.Cluster
 import com.google.maps.android.clustering.ClusterManager
+import com.google.maps.android.clustering.view.DefaultClusterRenderer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import java.io.InputStream
@@ -446,7 +447,7 @@ class CapacitorGoogleMap(
                 if (markers.isNotEmpty()) {
                     for ((_, marker) in markers) {
                         marker.googleMapMarker?.remove()
-                        // marker.googleMapMarker = null
+                        marker.googleMapMarker = null
                     }
                     clusterManager?.addItems(markers.values)
                     clusterManager?.cluster()
@@ -561,8 +562,13 @@ class CapacitorGoogleMap(
                     }
                 val options = markerOptions.await()
 
-                // Apply to native marker
-                val nativeMarker = existingMarker.googleMapMarker
+                // Find the native marker — either directly or via the cluster renderer
+                var nativeMarker = existingMarker.googleMapMarker
+                if (nativeMarker == null && clusterManager != null) {
+                    val renderer = clusterManager?.renderer as? DefaultClusterRenderer<CapacitorGoogleMapMarker>
+                    nativeMarker = renderer?.getMarker(existingMarker)
+                }
+
                 if (nativeMarker != null) {
                     nativeMarker.position = options.position
                     nativeMarker.title = options.title
@@ -577,11 +583,6 @@ class CapacitorGoogleMap(
                     if (options.icon != null) {
                         nativeMarker.setIcon(options.icon)
                     }
-                }
-
-                // If clustering is active, re-cluster to pick up changes
-                if (clusterManager != null) {
-                    clusterManager?.cluster()
                 }
 
                 callback(null)
@@ -920,7 +921,7 @@ class CapacitorGoogleMap(
         markerOptions.alpha(marker.opacity)
         markerOptions.flat(marker.isFlat)
         markerOptions.draggable(marker.draggable)
-        markerOptions.zIndex(marker.zIndex)
+        markerOptions.zIndex(marker.zIndex ?: 0.0f)
         if (marker.iconAnchor != null) {
             markerOptions.anchor(marker.iconAnchor!!.x, marker.iconAnchor!!.y)
         }
@@ -1038,14 +1039,29 @@ class CapacitorGoogleMap(
 
     fun setClusterListeners() {
         CoroutineScope(Dispatchers.Main).launch {
-            clusterManager?.setOnClusterItemClickListener {
-                if (null == it.googleMapMarker) false
-                else this@CapacitorGoogleMap.onMarkerClick(it.googleMapMarker!!)
+            clusterManager?.setOnClusterItemClickListener { item ->
+                val renderer = clusterManager?.renderer as? DefaultClusterRenderer<CapacitorGoogleMapMarker>
+                val renderedMarker = renderer?.getMarker(item)
+                if (renderedMarker != null) {
+                    this@CapacitorGoogleMap.onMarkerClick(renderedMarker)
+                } else {
+                    val data = JSObject()
+                    data.put("mapId", this@CapacitorGoogleMap.id)
+                    data.put("markerId", "")
+                    data.put("latitude", item.position.latitude)
+                    data.put("longitude", item.position.longitude)
+                    data.put("title", item.title)
+                    data.put("snippet", item.snippet)
+                    delegate.notify("onMarkerClick", data)
+                    false
+                }
             }
 
-            clusterManager?.setOnClusterItemInfoWindowClickListener {
-                if (null != it.googleMapMarker) {
-                    this@CapacitorGoogleMap.onInfoWindowClick(it.googleMapMarker!!)
+            clusterManager?.setOnClusterItemInfoWindowClickListener { item ->
+                val renderer = clusterManager?.renderer as? DefaultClusterRenderer<CapacitorGoogleMapMarker>
+                val renderedMarker = renderer?.getMarker(item)
+                if (renderedMarker != null) {
+                    this@CapacitorGoogleMap.onInfoWindowClick(renderedMarker)
                 }
             }
 

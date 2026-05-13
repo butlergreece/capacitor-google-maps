@@ -488,10 +488,7 @@ public class Map {
                 existingMarker.icon = GMSMarker.markerImage(with: color)
             }
 
-            // Re-cluster if needed
-            if self.mapViewController.clusteringEnabled {
-                self.mapViewController.clusterManager?.cluster()
-            }
+
         }
     }
 
