@@ -778,9 +778,13 @@ public class Map {
 }
 
 private func getResizedIcon(_ iconImage: UIImage, _ marker: Marker) -> UIImage? {
+    print("ButlerMarker: getResizedIcon input=\(iconImage.size) scale=\(iconImage.scale) markerIconSize=\(String(describing: marker.iconSize))")
     if let iconSize = marker.iconSize {
-        return iconImage.resizeImageTo(size: iconSize)
+        let resized = iconImage.resizeImageTo(size: iconSize)
+        print("ButlerMarker: resized to \(resized?.size ?? .zero) scale=\(resized?.scale ?? 0)")
+        return resized
     } else {
+        print("ButlerMarker: iconSize is nil, returning original image")
         return iconImage
     }
 }

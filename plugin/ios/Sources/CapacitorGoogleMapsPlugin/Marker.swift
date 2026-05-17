@@ -25,17 +25,19 @@ public struct Marker {
 
         var iconSize: CGSize?
         if let sizeObj = fromJSObject["iconSize"] as? JSObject {
-            if let width = sizeObj["width"] as? Double, let height = sizeObj["height"] as? Double {
-                iconSize = CGSize(width: width, height: height)
+            if let width = sizeObj["width"] as? NSNumber, let height = sizeObj["height"] as? NSNumber {
+                iconSize = CGSize(width: width.doubleValue, height: height.doubleValue)
             }
         }
 
+        print("ButlerMarker: keys=\(Array(fromJSObject.keys)) iconSize raw=\(String(describing: fromJSObject["iconSize"])) parsed=\(String(describing: iconSize))")
+
         var iconAnchor: CGPoint?
         if let anchorObject = fromJSObject["iconAnchor"] as? JSObject {
-            if let x = anchorObject["x"] as? Double, let y = anchorObject["y"] as? Double {
+            if let x = anchorObject["x"] as? NSNumber, let y = anchorObject["y"] as? NSNumber {
                 if let size = iconSize {
-                    let u = x / size.width
-                    let v = y / size.height
+                    let u = x.doubleValue / size.width
+                    let v = y.doubleValue / size.height
 
                     iconAnchor = CGPoint(x: u, y: v)
                 }
