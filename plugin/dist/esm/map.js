@@ -112,25 +112,38 @@ export class GoogleMap {
             });
             newMap.resizeObserver.observe(newMap.element);
         }
-        // small delay to allow for iOS WKWebView to setup corresponding element sub-scroll views ???
-        await new Promise((resolve, reject) => {
-            setTimeout(async () => {
-                try {
-                    await CapacitorGoogleMaps.create(options);
-                    resolve(undefined);
-                }
-                catch (err) {
-                    reject(err);
-                }
-            }, 200);
-        });
+        // Register the onMapReady listener BEFORE awaiting the native create call.
+        // On Android, native fires onMapReady very quickly after create returns —
+        // often before this JS context resumes — so registering afterwards means
+        // we miss the event and any caller awaiting the callback stalls until
+        // their own safety timeout fires.
+        let onMapReadyListener;
         if (callback) {
-            const onMapReadyListener = await CapacitorGoogleMaps.addListener('onMapReady', (data) => {
+            onMapReadyListener = await CapacitorGoogleMaps.addListener('onMapReady', (data) => {
                 if (data.mapId == newMap.id) {
                     callback(data);
-                    onMapReadyListener.remove();
+                    onMapReadyListener === null || onMapReadyListener === void 0 ? void 0 : onMapReadyListener.remove();
                 }
             });
+        }
+        try {
+            // small delay to allow for iOS WKWebView to setup corresponding element sub-scroll views ???
+            await new Promise((resolve, reject) => {
+                setTimeout(async () => {
+                    try {
+                        await CapacitorGoogleMaps.create(options);
+                        resolve();
+                    }
+                    catch (err) {
+                        reject(err);
+                    }
+                }, 200);
+            });
+        }
+        catch (err) {
+            // If create fails, remove the listener so we don't leak it
+            onMapReadyListener === null || onMapReadyListener === void 0 ? void 0 : onMapReadyListener.remove();
+            throw err;
         }
         return newMap;
     }
