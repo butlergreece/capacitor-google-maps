@@ -3,6 +3,7 @@ package com.capacitorjs.plugins.googlemaps
 import android.Manifest
 import android.annotation.SuppressLint
 import android.graphics.RectF
+import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -35,6 +36,22 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
     private var cachedTouchEvents: HashMap<String, MutableList<MotionEvent>> = HashMap()
     private val tag: String = "CAP-GOOGLE-MAPS"
     private var touchEnabled: HashMap<String, Boolean> = HashMap()
+    // BTLR_PATCH_B11 — Reentrancy guard for replayed-to-WebView touches.
+    // When the JS hit-test says a touch is NOT on the map (focus=false), we
+    // replay it via WebView.dispatchTouchEvent (full Chromium pipeline) so
+    // the gesture detector can produce real scroll/click events. We previously
+    // used WebView.onTouchEvent which bypassed the dispatch chain and wedged
+    // Chromium's gesture state permanently after the first non-map replay.
+    // This flag stops our own OnTouchListener from re-intercepting the
+    // replayed event.
+    private var inReplay: Boolean = false
+    // BTLR_PATCH_B11 — Per-map replay-time anchors. We regenerate timestamps
+    // on each replayed event because Chromium's TouchEventQueue wedges when
+    // it receives events whose downTime/eventTime are in the past. We preserve
+    // the relative timing between cached events but shift the whole gesture
+    // forward to "now" so Chromium sees a coherent, current-clock gesture.
+    private var replayFirstOriginalEventTime: HashMap<String, Long> = HashMap()
+    private var replayBaseTime: HashMap<String, Long> = HashMap()
 
     companion object {
         const val LOCATION = "location"
@@ -50,6 +67,12 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
         this.bridge.webView.setOnTouchListener(
                 object : View.OnTouchListener {
                     override fun onTouch(v: View?, event: MotionEvent?): Boolean {
+                        // BTLR_PATCH_B11 — let replayed events flow through
+                        // the WebView's normal dispatch path (we set this
+                        // flag in dispatchMapEvent before replaying).
+                        if (inReplay) {
+                            return false
+                        }
                         if (event != null) {
                             if (event.source == -1) {
                                 return v?.onTouchEvent(event) ?: true
@@ -968,7 +991,52 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
                     if (focus) {
                         map.dispatchTouchEvent(event)
                     } else {
-                        this.bridge.webView.onTouchEvent(event)
+                        // BTLR_PATCH_B11 — Replay the cached event to the WebView
+                        // via the full dispatch pipeline AND with regenerated
+                        // current-clock timestamps. The original cached events
+                        // hold past timestamps (from MotionEvent.obtain on the
+                        // intercepted user touch). Feeding past-time events into
+                        // Chromium's TouchEventQueue — even via the proper
+                        // dispatchTouchEvent entry point — wedges its gesture
+                        // detector permanently. We preserve the original relative
+                        // timing between events in a gesture by shifting the
+                        // whole gesture forward to "now".
+                        val nowUptime = SystemClock.uptimeMillis()
+                        val originalEventTime = event.eventTime
+                        if (event.action == MotionEvent.ACTION_DOWN ||
+                            replayBaseTime[id] == null) {
+                            replayBaseTime[id] = nowUptime
+                            replayFirstOriginalEventTime[id] = originalEventTime
+                        }
+                        val baseTime = replayBaseTime[id] ?: nowUptime
+                        val firstOrigTime = replayFirstOriginalEventTime[id] ?: originalEventTime
+                        val delta = originalEventTime - firstOrigTime
+                        val freshDownTime = baseTime
+                        val freshEventTime = baseTime + delta
+
+                        val freshEvent = MotionEvent.obtain(
+                            freshDownTime,
+                            freshEventTime,
+                            event.action,
+                            event.x,
+                            event.y,
+                            event.metaState
+                        )
+
+                        Log.i("BTLR_PATCH_B11", "replay action=${event.action} x=${event.x} y=${event.y} origT=$originalEventTime freshT=$freshEventTime")
+                        inReplay = true
+                        try {
+                            this.bridge.webView.dispatchTouchEvent(freshEvent)
+                        } finally {
+                            inReplay = false
+                            freshEvent.recycle()
+                        }
+
+                        if (event.action == MotionEvent.ACTION_UP ||
+                            event.action == MotionEvent.ACTION_CANCEL) {
+                            replayBaseTime.remove(id)
+                            replayFirstOriginalEventTime.remove(id)
+                        }
                     }
                     events.removeAt(0)
                 }
