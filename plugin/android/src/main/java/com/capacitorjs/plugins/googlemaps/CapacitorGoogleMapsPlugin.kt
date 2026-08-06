@@ -2,6 +2,7 @@ package com.capacitorjs.plugins.googlemaps
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.os.SystemClock
 import android.util.Log
@@ -32,10 +33,18 @@ import org.json.JSONObject
                 ],
 )
 class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
-    private var maps: HashMap<String, CapacitorGoogleMap> = HashMap()
-    private var cachedTouchEvents: HashMap<String, MutableList<MotionEvent>> = HashMap()
+    // BTLR_PATCH_B18 — all per-map state maps are ConcurrentHashMap: they are
+    // written from Capacitor's plugin executor thread (create/destroy,
+    // enable/disableTouch, setTouchExclusionZones) and read/iterated on the
+    // UI thread (onTouch, posted replay). Plain HashMap here can throw
+    // ConcurrentModificationException mid-touch or lose visibility of writes.
+    // The MutableList VALUES inside cachedTouchEvents are UI-thread-only
+    // (onTouch writes them; the dispatchMapEvent drain is posted to the UI
+    // thread) — the concurrent map only guards the id→list mapping itself.
+    private var maps: java.util.concurrent.ConcurrentHashMap<String, CapacitorGoogleMap> = java.util.concurrent.ConcurrentHashMap()
+    private var cachedTouchEvents: java.util.concurrent.ConcurrentHashMap<String, MutableList<MotionEvent>> = java.util.concurrent.ConcurrentHashMap()
     private val tag: String = "CAP-GOOGLE-MAPS"
-    private var touchEnabled: HashMap<String, Boolean> = HashMap()
+    private var touchEnabled: java.util.concurrent.ConcurrentHashMap<String, Boolean> = java.util.concurrent.ConcurrentHashMap()
     // BTLR_PATCH_B11 — Reentrancy guard for replayed-to-WebView touches.
     // When the JS hit-test says a touch is NOT on the map (focus=false), we
     // replay it via WebView.dispatchTouchEvent (full Chromium pipeline) so
@@ -50,8 +59,34 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
     // it receives events whose downTime/eventTime are in the past. We preserve
     // the relative timing between cached events but shift the whole gesture
     // forward to "now" so Chromium sees a coherent, current-clock gesture.
-    private var replayFirstOriginalEventTime: HashMap<String, Long> = HashMap()
-    private var replayBaseTime: HashMap<String, Long> = HashMap()
+    // BTLR_PATCH_B18 — concurrent: written on the UI thread (posted replay),
+    // removed on the plugin thread (destroy).
+    private var replayFirstOriginalEventTime: java.util.concurrent.ConcurrentHashMap<String, Long> = java.util.concurrent.ConcurrentHashMap()
+    private var replayBaseTime: java.util.concurrent.ConcurrentHashMap<String, Long> = java.util.concurrent.ConcurrentHashMap()
+    // BTLR_PATCH_B18 — Per-map touch-exclusion zones (physical px, keyed by
+    // map id). The JS layer registers the rects of DOM overlays that sit
+    // inside the map's geometric bounds (bottom drawer, map control buttons).
+    // A gesture STARTING inside a zone is never intercepted: it flows through
+    // the normal WebView dispatch chain with zero caching, zero JS roundtrip
+    // and zero replay — which is what keeps drawer drags smooth. Written from
+    // Capacitor's plugin thread, read from the UI thread in onTouch, hence
+    // the concurrent map (values are immutable lists, swapped atomically).
+    private val touchExclusionZones: java.util.concurrent.ConcurrentHashMap<String, List<Rect>> = java.util.concurrent.ConcurrentHashMap()
+    // BTLR_PATCH_B18 — Gesture-scoped bypass. The intercept decision is made
+    // once at ACTION_DOWN and locked for the entire gesture: if the DOWN was
+    // not intercepted (outside every map, or inside an exclusion zone), all
+    // following MOVE/UP events bypass the maps loop even when the finger
+    // crosses into map bounds mid-gesture. Without this, a drawer drag that
+    // travels upward would suddenly get intercepted mid-stream, fragmenting
+    // the gesture Chromium (and vaul's pointer capture) sees. Main thread only.
+    private var gestureBypass: Boolean = false
+    // BTLR_PATCH_B18 — monotonic gesture counter, incremented at every
+    // ACTION_DOWN on the UI thread. dispatchMapEvent snapshots it (volatile
+    // read on the plugin thread) and the posted drain aborts if a NEWER
+    // gesture has started meanwhile: the cache then belongs to the new
+    // gesture, and replaying it under the old gesture's focus decision would
+    // inject a stale gesture into the middle of a live one.
+    @Volatile private var gestureSeq: Long = 0
 
     companion object {
         const val LOCATION = "location"
@@ -78,6 +113,19 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
                                 return v?.onTouchEvent(event) ?: true
                             }
 
+                            val isDown = event.actionMasked == MotionEvent.ACTION_DOWN
+
+                            // BTLR_PATCH_B18 — the DOWN decided this gesture is
+                            // not ours: let every subsequent event flow through
+                            // the normal dispatch chain untouched.
+                            if (!isDown && gestureBypass) {
+                                return v?.onTouchEvent(event) ?: true
+                            }
+                            if (isDown) {
+                                gestureBypass = false
+                                gestureSeq++
+                            }
+
                             val touchX = event.x
                             val touchY = event.y
 
@@ -87,6 +135,15 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
                                 }
                                 val mapRect = map.getMapBounds()
                                 if (mapRect.contains(touchX.toInt(), touchY.toInt())) {
+                                    // BTLR_PATCH_B18 — gestures starting on a
+                                    // registered DOM overlay (drawer, control
+                                    // buttons) are not intercepted at all.
+                                    if (isDown) {
+                                        val zones = touchExclusionZones[id]
+                                        if (zones != null && zones.any { it.contains(touchX.toInt(), touchY.toInt()) }) {
+                                            continue
+                                        }
+                                    }
                                     if (event.action == MotionEvent.ACTION_DOWN) {
                                         if (cachedTouchEvents[id] == null) {
                                             cachedTouchEvents[id] = mutableListOf<MotionEvent>()
@@ -106,6 +163,12 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
                                     notifyListeners("isMapInFocus", payload)
                                     return true
                                 }
+                            }
+
+                            // BTLR_PATCH_B18 — DOWN not intercepted by any map:
+                            // lock the bypass for the rest of this gesture.
+                            if (isDown) {
+                                gestureBypass = true
                             }
                         }
 
@@ -197,6 +260,14 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
             val removedMap = maps.remove(id) ?: throw MapNotFoundError()
             removedMap.destroy()
 
+            // BTLR_PATCH_B18 — drop per-map touch state so a recreated map
+            // with a new id doesn't accumulate stale entries.
+            touchExclusionZones.remove(id)
+            cachedTouchEvents.remove(id)
+            touchEnabled.remove(id)
+            replayBaseTime.remove(id)
+            replayFirstOriginalEventTime.remove(id)
+
             call.resolve()
         } catch (e: GoogleMapsError) {
             handleError(call, e)
@@ -210,7 +281,10 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
         try {
             val id = call.getString("id")
             id ?: throw InvalidMapIdError()
-            touchEnabled[id] = true
+            // BTLR_PATCH_B18 — ignore late calls for destroyed/unknown maps.
+            if (maps.containsKey(id)) {
+                touchEnabled[id] = true
+            }
             call.resolve()
         } catch (e: GoogleMapsError) {
             handleError(call, e)
@@ -224,7 +298,58 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
         try {
             val id = call.getString("id")
             id ?: throw InvalidMapIdError()
-            touchEnabled[id] = false
+            // BTLR_PATCH_B18 — ignore late calls for destroyed/unknown maps.
+            if (maps.containsKey(id)) {
+                touchEnabled[id] = false
+            }
+            call.resolve()
+        } catch (e: GoogleMapsError) {
+            handleError(call, e)
+        } catch (e: Exception) {
+            handleError(call, e)
+        }
+    }
+
+    // BTLR_PATCH_B18 — Register DOM-overlay rects (CSS px, viewport-relative)
+    // that must never be intercepted even though they sit inside the map's
+    // geometric bounds. Scaled to physical px with displayMetrics.density —
+    // the same scale getMapBounds() uses for the hit-test rect. An empty
+    // zones array clears the map's exclusions.
+    @PluginMethod
+    fun setTouchExclusionZones(call: PluginCall) {
+        try {
+            val id = call.getString("id")
+            id ?: throw InvalidMapIdError()
+            // No-op for destroyed/unknown maps so late bridge calls can't
+            // recreate state under a dead id.
+            if (!maps.containsKey(id)) {
+                touchExclusionZones.remove(id)
+                call.resolve()
+                return
+            }
+            val zonesArray = call.getArray("zones") ?: JSArray()
+            val scale = bridge.activity.resources.displayMetrics.density
+            val rects = mutableListOf<Rect>()
+            for (i in 0 until zonesArray.length()) {
+                val zone = zonesArray.getJSONObject(i)
+                val x = zone.getDouble("x")
+                val y = zone.getDouble("y")
+                val width = zone.getDouble("width")
+                val height = zone.getDouble("height")
+                // floor the near edges, ceil the far edges: zones must be
+                // conservatively INCLUSIVE so a fractional-density rounding
+                // difference can't leave a 1px interceptable band along the
+                // overlay's edge.
+                rects.add(
+                        Rect(
+                                Math.floor(x * scale).toInt(),
+                                Math.floor(y * scale).toInt(),
+                                Math.ceil((x + width) * scale).toInt(),
+                                Math.ceil((y + height) * scale).toInt()
+                        )
+                )
+            }
+            touchExclusionZones[id] = rects
             call.resolve()
         } catch (e: GoogleMapsError) {
             handleError(call, e)
@@ -984,61 +1109,80 @@ class CapacitorGoogleMapsPlugin : Plugin(), OnMapsSdkInitializedCallback {
 
             val focus = call.getBoolean("focus", false)!!
 
-            val events = cachedTouchEvents[id]
-            if (events != null) {
-                while(events.size > 0) {
-                    val event = events.first()
-                    if (focus) {
-                        map.dispatchTouchEvent(event)
-                    } else {
-                        // BTLR_PATCH_B11 — Replay the cached event to the WebView
-                        // via the full dispatch pipeline AND with regenerated
-                        // current-clock timestamps. The original cached events
-                        // hold past timestamps (from MotionEvent.obtain on the
-                        // intercepted user touch). Feeding past-time events into
-                        // Chromium's TouchEventQueue — even via the proper
-                        // dispatchTouchEvent entry point — wedges its gesture
-                        // detector permanently. We preserve the original relative
-                        // timing between events in a gesture by shifting the
-                        // whole gesture forward to "now".
-                        val nowUptime = SystemClock.uptimeMillis()
-                        val originalEventTime = event.eventTime
-                        if (event.action == MotionEvent.ACTION_DOWN ||
-                            replayBaseTime[id] == null) {
-                            replayBaseTime[id] = nowUptime
-                            replayFirstOriginalEventTime[id] = originalEventTime
-                        }
-                        val baseTime = replayBaseTime[id] ?: nowUptime
-                        val firstOrigTime = replayFirstOriginalEventTime[id] ?: originalEventTime
-                        val delta = originalEventTime - firstOrigTime
-                        val freshDownTime = baseTime
-                        val freshEventTime = baseTime + delta
+            // BTLR_PATCH_B18 — the whole drain runs POSTED to the UI thread:
+            // (a) the previous code called webView.dispatchTouchEvent from
+            // Capacitor's plugin executor, which is illegal for Views; (b) the
+            // cache list is written by onTouch on the UI thread, so draining
+            // it from the plugin thread raced those writes. On the UI thread
+            // both operations serialize with onTouch by construction.
+            // gestureSeq snapshot: if a NEWER gesture has started by the time
+            // the drain runs, the cache belongs to that new gesture (its
+            // ACTION_DOWN cleared and refilled it) — this focus decision is
+            // stale, so leave the cache for the new gesture's own handshake.
+            val seqAtDecision = gestureSeq
+            this.bridge.activity.runOnUiThread {
+                if (gestureSeq != seqAtDecision) {
+                    return@runOnUiThread
+                }
+                // Map may have been destroyed between resolve and this post.
+                val liveMap = maps[id]
+                val events = cachedTouchEvents[id]
+                if (events != null && events.size > 0) {
+                    for (event in events) {
+                        if (liveMap == null) {
+                            event.recycle()
+                        } else if (focus) {
+                            liveMap.dispatchTouchEvent(event)
+                        } else {
+                            // BTLR_PATCH_B11 — Replay the cached event to the WebView
+                            // via the full dispatch pipeline AND with regenerated
+                            // current-clock timestamps. The original cached events
+                            // hold past timestamps (from MotionEvent.obtain on the
+                            // intercepted user touch). Feeding past-time events into
+                            // Chromium's TouchEventQueue — even via the proper
+                            // dispatchTouchEvent entry point — wedges its gesture
+                            // detector permanently. We preserve the original relative
+                            // timing between events in a gesture by shifting the
+                            // whole gesture forward to "now".
+                            val nowUptime = SystemClock.uptimeMillis()
+                            val originalEventTime = event.eventTime
+                            if (event.action == MotionEvent.ACTION_DOWN ||
+                                replayBaseTime[id] == null) {
+                                replayBaseTime[id] = nowUptime
+                                replayFirstOriginalEventTime[id] = originalEventTime
+                            }
+                            val baseTime = replayBaseTime[id] ?: nowUptime
+                            val firstOrigTime = replayFirstOriginalEventTime[id] ?: originalEventTime
+                            val delta = originalEventTime - firstOrigTime
+                            val freshDownTime = baseTime
+                            val freshEventTime = baseTime + delta
 
-                        val freshEvent = MotionEvent.obtain(
-                            freshDownTime,
-                            freshEventTime,
-                            event.action,
-                            event.x,
-                            event.y,
-                            event.metaState
-                        )
+                            val freshEvent = MotionEvent.obtain(
+                                freshDownTime,
+                                freshEventTime,
+                                event.action,
+                                event.x,
+                                event.y,
+                                event.metaState
+                            )
 
-                        Log.i("BTLR_PATCH_B11", "replay action=${event.action} x=${event.x} y=${event.y} origT=$originalEventTime freshT=$freshEventTime")
-                        inReplay = true
-                        try {
-                            this.bridge.webView.dispatchTouchEvent(freshEvent)
-                        } finally {
-                            inReplay = false
-                            freshEvent.recycle()
-                        }
+                            Log.i("BTLR_PATCH_B11", "replay action=${event.action} x=${event.x} y=${event.y} origT=$originalEventTime freshT=$freshEventTime")
+                            inReplay = true
+                            try {
+                                this.bridge.webView.dispatchTouchEvent(freshEvent)
+                            } finally {
+                                inReplay = false
+                                freshEvent.recycle()
+                            }
 
-                        if (event.action == MotionEvent.ACTION_UP ||
-                            event.action == MotionEvent.ACTION_CANCEL) {
-                            replayBaseTime.remove(id)
-                            replayFirstOriginalEventTime.remove(id)
+                            if (event.action == MotionEvent.ACTION_UP ||
+                                event.action == MotionEvent.ACTION_CANCEL) {
+                                replayBaseTime.remove(id)
+                                replayFirstOriginalEventTime.remove(id)
+                            }
                         }
                     }
-                    events.removeAt(0)
+                    events.clear()
                 }
             }
 
